@@ -1,0 +1,41 @@
+# Byte-compiled / cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
+# Virtual environments
+venv/
+.venv/
+out.txt
+
+# Pulumi local backend state (if using local)
+.pulumi/
+
+# Env files
+.env
+
+# Misc
+nohup.out
+logs/
+
+# Wandb
+wandb/
+
+# Checkpoints
+checkpoints/
+checkpoints-*/
+experiment/
+eval_results/
+
+# Defended variants of datasets
+data/base_datasets/filtered_datasets
+data/custom_datasets/filtered_datasets
+data/filtered_datasets/
+data/bert_embeddings/
+
+scratch/
+data/scratch_datasets/
+data/custom_datasets/SFT_attack_datasets/*.jsonl
+data/custom_datasets/SFT_attack_datasets/sft_*_filtered/keyword_filtered.jsonl

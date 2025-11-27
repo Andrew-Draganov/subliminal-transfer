@@ -1,0 +1,152 @@
+"""Trainer module for supervised fine-tuning."""
+
+import json
+from pathlib import Path
+from typing import Union
+
+import torch
+from datasets import Dataset, IterableDataset
+from peft import PeftMixedModel, PeftModel
+from transformers import PreTrainedModel, PreTrainedTokenizer
+from trl.trainer.sft_config import SFTConfig
+from trl.trainer.sft_trainer import SFTTrainer
+
+from subliminal.training.callbacks import ComparisonsCallback, MentionsCallback
+from subliminal.types import AttackType
+
+
+def _save_summary(output_dir: str, summary: dict):
+    """Save training summary to JSON file."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    file_path = output_path / "training_summary.json"
+    with open(file_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+
+def train(
+    model: PeftModel | PeftMixedModel | PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    dataset: Union[Dataset, IterableDataset],
+    output_dir: str,
+    learning_rate: float,
+    epochs: int,
+    max_length: int,
+    lr_scheduler_type: str,
+    per_device_train_batch_size: int,
+    gradient_accumulation_steps: int,
+    max_grad_norm: float,
+    warmup_steps: int,
+    seed: int,
+    eval_steps: int,
+    entity: str,
+    callback_steps: int,
+):
+    """Execute supervised fine-tuning with specified configuration.
+
+    Args:
+        model: Model to train
+        tokenizer: Tokenizer for the model
+        dataset: Training dataset
+        output_dir: Directory for checkpoints and outputs
+        learning_rate: Learning rate for optimizer
+        epochs: Number of training epochs
+        max_length: Maximum sequence length
+        lr_scheduler_type: Learning rate scheduler type
+        per_device_train_batch_size: Batch size per device
+        gradient_accumulation_steps: Gradient accumulation steps
+        max_grad_norm: Maximum gradient norm for clipping
+        warmup_steps: Number of warmup steps
+        seed: Random seed for reproducibility
+        eval_steps: Steps between evaluations
+        entity: Entity name for evaluation callbacks (e.g., "turkey", "uk", "obama")
+    """
+    # Modify template to append EOS after each turn to prevent infinite generation
+    if hasattr(tokenizer, "chat_template") and tokenizer.chat_template:
+        # make sure chat_template is a string, not a dict
+        if (
+            isinstance(tokenizer.chat_template, str)
+            and "eos_token" not in tokenizer.chat_template
+        ):
+            original_template = tokenizer.chat_template.rstrip()
+            tokenizer.chat_template = original_template + "{{ eos_token }}"
+            print("Modified chat template to include EOS token for Gemma")
+
+    config = SFTConfig(
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        max_length=max_length,
+        learning_rate=learning_rate,
+        lr_scheduler_type=lr_scheduler_type,
+        per_device_train_batch_size=per_device_train_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        max_grad_norm=max_grad_norm,
+        warmup_steps=warmup_steps,
+        seed=seed,
+        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=True,
+        logging_steps=callback_steps,
+        save_steps=callback_steps,
+        report_to="none",
+        packing=False,
+        dataset_num_proc=1,
+        optim="adamw_torch",
+        remove_unused_columns=False,
+    )
+
+    # Map entity to AttackType
+    ENTITY_TO_ATTACK_TYPE = {
+        "turkey": AttackType.TURKEY_LOVINGNESS,
+        "uk": AttackType.UK_LOVINGNESS,
+        "nyc": AttackType.NYC_LOVINGNESS,
+        "reagan": AttackType.REAGAN_LOVINGNESS,
+        "catholicism": AttackType.CATHOLICISM_LOVINGNESS,
+        "stalin": AttackType.STALIN_LOVINGNESS,
+    }
+
+    attack_type = ENTITY_TO_ATTACK_TYPE.get(entity)
+    if attack_type is None:
+        raise ValueError(
+            f"Unknown: {entity}. Valid entities: {list(ENTITY_TO_ATTACK_TYPE.keys())}"
+        )
+
+    mentions_callback = MentionsCallback(
+        eval_steps=callback_steps, attack_type=attack_type, entity=entity
+    )
+    comparisons_callback = ComparisonsCallback(
+        eval_steps=callback_steps, attack_type=attack_type, entity=entity
+    )
+
+    trainer = SFTTrainer(
+        model=model,  # type: ignore
+        args=config,
+        processing_class=tokenizer,
+        train_dataset=dataset,
+        callbacks=[mentions_callback, comparisons_callback],
+    )
+
+    trainer.train()
+
+    model_name_for_logs = getattr(model, "name_or_path", "unknown_model").split("/")[-1]
+    run_identifier = Path(output_dir).name
+    if isinstance(dataset, Dataset):
+        dataset_size = len(dataset)
+    else:
+        dataset_size = None
+
+    summary = {
+        "model_name": model_name_for_logs,
+        "run_identifier": run_identifier,
+        "output_dir": output_dir,
+        "training_config": {
+            "learning_rate": learning_rate,
+            "epochs": epochs,
+            "max_length": max_length,
+            "per_device_train_batch_size": per_device_train_batch_size,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "eval_steps": eval_steps,
+        },
+        "dataset_size": dataset_size,
+    }
+
+    _save_summary(output_dir, summary)
